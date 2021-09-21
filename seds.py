@@ -5,6 +5,7 @@ import torch.utils.data
 
 
 def load_data():
+    dat_dir = '/tigress/chhahn/arcoiris/sedflow/'
     version = '0.0'
     props, mags, sigs, zreds = [], [], [], []
     for seed in range(11): 
@@ -67,11 +68,34 @@ def load_dataloaders(batch_size, device):
     # number of conditional inputs
     num_inputs      = x_train.shape[1]
     num_cond_inputs = y_train.shape[1]
+    
+    # construct dataloaders
+    kwargs = {'num_workers': 1, 'pin_memory': True} if device.type is 'cuda' else {}
 
     # set up loaders
     train_loader = torch.utils.data.DataLoader(train_dataset,
-                    batch_size=batch_size, shuffle=True, **kwargs).to(device)
+                    batch_size=batch_size, shuffle=True, drop_last=True, **kwargs)
     valid_loader = torch.utils.data.DataLoader(valid_dataset,
-                    batch_size=test_batch_size, shuffle=False, drop_last=False,
-                    **kwargs).to(device) 
+                    batch_size=batch_size, shuffle=False, drop_last=True, **kwargs) 
     return train_loader, valid_loader 
+
+
+def load_test_dataloaders(batch_size, device): 
+    _, _, _, _, x_test, y_test = load_data()
+
+    print('Ntest = %i' % (x_test.shape[0]))
+    test_tensor    = torch.from_numpy(x_test.astype(np.float32))
+    test_cond      = torch.from_numpy(y_test.astype(np.float32))
+    test_dataset   = torch.utils.data.TensorDataset(test_tensor, test_cond)
+
+    # number of conditional inputs
+    num_inputs      = x_test.shape[1]
+    num_cond_inputs = y_test.shape[1]
+    
+    # construct dataloaders
+    kwargs = {'num_workers': 1, 'pin_memory': True} if device.type is 'cuda' else {}
+
+    # set up loaders
+    test_loader = torch.utils.data.DataLoader(test_dataset,
+                    batch_size=batch_size, shuffle=False, drop_last=True, **kwargs)
+    return test_loader 

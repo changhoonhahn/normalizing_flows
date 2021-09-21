@@ -13,6 +13,7 @@ from torchvision.utils import save_image
 import os, sys 
 import math
 import copy
+import numpy as np 
 
 import seds as SEDs
     
@@ -35,10 +36,10 @@ if device.type == 'cuda':
 print(device)
 
 # load training and validation data
-train_dataloader, valid_dataloader = SEDs.load_dataloaders(batch_size, device) 
+test_dataloader = SEDs.load_test_dataloaders(batch_size, device) 
 
-input_size      = train_dataloader.dataset.tensors[0].shape[1]
-cond_label_size = train_dataloader.dataset.tensors[1].shape[1]
+input_size      = test_dataloader.dataset.tensors[0].shape[1]
+cond_label_size = test_dataloader.dataset.tensors[1].shape[1]
 
 # --------------------
 # Model layers and helpers
@@ -514,37 +515,28 @@ def evaluate(model, dataloader, epoch):
     print(output, file=open(os.path.join(output_dir, '%s.txt' % outfile), 'a'))
     return logprob_mean, logprob_std
 
+
 @torch.no_grad()
-def generate(model, dataset_lam, args, step=None, n_row=10):
+def generate(model, dataloader, ncomp):
     model.eval()
+    if ncomp is None: 
+        ncomp = 1 
 
-    # conditional model
-    if args.cond_label_size:
-        samples = []
-        labels = torch.eye(args.cond_label_size).to(args.device)
+    samples = []
+    for x, y in dataloader:
+        x = x.view(x.shape[0], -1).to(device)
+        y = y.to(device) 
 
-        for i in range(args.cond_label_size):
-            # sample model base distribution and run through inverse model to sample data space
-            u = model.base_dist.sample((n_row, args.n_components)).squeeze()
-            labels_i = labels[i].expand(n_row, -1)
-            sample, _ = model.inverse(u, labels_i)
-            log_probs = model.log_prob(sample, labels_i).sort(0)[1].flip(0)  # sort by log_prob; take argsort idxs; flip high to low
-            samples.append(sample[log_probs])
-
-        samples = torch.cat(samples, dim=0)
-
-    # unconditional model
-    else:
-        u = model.base_dist.sample((n_row**2, args.n_components)).squeeze()
-        samples, _ = model.inverse(u)
-        log_probs = model.log_prob(samples).sort(0)[1].flip(0)  # sort by log_prob; take argsort idxs; flip high to low
-        samples = samples[log_probs]
-
-    # convert and save images
-    samples = samples.view(samples.shape[0], *args.input_dims)
-    samples = (torch.sigmoid(samples) - dataset_lam) / (1 - 2 * dataset_lam)
-    filename = 'generated_samples' + (step != None)*'_epoch_{}'.format(step) + '.png'
-    save_image(samples, os.path.join(args.output_dir, filename), nrow=n_row, normalize=True)
+        # sample model base distribution and run through inverse model to sample data space
+        u = model.base_dist.sample((x.shape[0], ncomp)).squeeze()
+        sample, _ = model.inverse(u, y)
+        samples.append(sample)
+    samples = torch.cat(samples, dim=0)
+        
+    # save samples drawn from NDE
+    fsample = os.path.join(output_dir, '%s.test_samples.npy' % outfile)
+    np.save(fsample, samples.detach().cpu()) 
+    return None
 
 
 def train_and_evaluate(model, train_loader, valid_loader, optimizer):
@@ -575,7 +567,6 @@ def train_and_evaluate(model, train_loader, valid_loader, optimizer):
                         'optimizer_state': optimizer.state_dict()},
                         os.path.join(output_dir, '%s.best_model_checkpoint.pt' % outfile))
 
-
 # model
 if model_name == 'made':
     model = MADE(
@@ -585,6 +576,7 @@ if model_name == 'made':
             cond_label_size, 
             activation_fn,
             input_order)
+    n_components = None
 elif model_name == 'mademog':
     n_components = int(sys.argv[5]) 
     assert n_components > 1
@@ -607,6 +599,7 @@ elif model_name == 'maf':
             activation_fn, 
             input_order, 
             batch_norm=True)
+    n_components = None
 elif model_name == 'mafmog':
     n_blocks        = int(sys.argv[5])
     n_components    = int(sys.argv[6])
@@ -632,10 +625,19 @@ elif model_name =='realnvp':
             n_layer, 
             cond_label_size,
             batch_norm=True) 
+    n_components = None
 else:
     raise ValueError('Unrecognized model.')
 
 model = model.to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-6)
 
-train_and_evaluate(model, train_dataloader, valid_dataloader, optimizer)
+# load model and optimizer states
+fbest = os.path.join(output_dir, '%s.best_model_checkpoint.pt' % outfile)
+state = torch.load(fbest, map_location=device)
+model.load_state_dict(state['model_state'])
+optimizer.load_state_dict(state['optimizer_state'])
+
+evaluate(model, test_dataloader, state['epoch'])
+
+generate(model, test_dataloader, n_components) 
